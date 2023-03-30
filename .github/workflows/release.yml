@@ -21,14 +21,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: 🔨 Setup pnpm
+        uses: pnpm/action-setup@v2.2.4
+
       - name: ⎔ Setup node
         uses: actions/setup-node@v3
         with:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
-
-      - name: 🔨 Setup pnpm
-        uses: pnpm/action-setup@v2.2.4
 
       - name: 📥 Install deps
         run: pnpm install --frozen-lockfile
