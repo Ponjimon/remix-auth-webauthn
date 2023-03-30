@@ -1,6 +1,6 @@
 {
   "name": "@ponjimon/remix-auth-webauthn",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -28,7 +28,7 @@
     "test:coverage": "vitest --coverage",
     "prepare": "husky install",
     "changeset": "changeset",
-    "changeset:version": "pnpm exec changeset:version",
+    "changeset:version": "pnpm exec changeset version",
     "changeset:release": "pnpm run build && pnpm exec changeset publish"
   },
   "files": [
