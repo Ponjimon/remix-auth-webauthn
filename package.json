@@ -28,7 +28,7 @@
     "test:coverage": "vitest --coverage",
     "prepare": "husky install",
     "changeset": "changeset",
-    "changeset:version": "pnpm exec changeset:version",
+    "changeset:version": "pnpm exec changeset version",
     "changeset:release": "pnpm run build && pnpm exec changeset publish"
   },
   "files": [
