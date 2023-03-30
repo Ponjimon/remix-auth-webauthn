@@ -1,5 +1,5 @@
 {
-  "name": "remix-auth-webauthn",
+  "name": "@ponjimon/remix-auth-webauthn",
   "version": "0.0.0",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -26,7 +26,10 @@
     "format": "prettier --write .",
     "test": "vitest --reporter verbose",
     "test:coverage": "vitest --coverage",
-    "prepare": "husky install"
+    "prepare": "husky install",
+    "changeset": "changeset",
+    "changeset:version": "pnpm exec changeset:version",
+    "changeset:release": "pnpm run build && pnpm exec changeset publish"
   },
   "files": [
     "dist",
@@ -34,7 +37,6 @@
     "README.md"
   ],
   "dependencies": {
-    "@ponjimon/utils": "^1.1.1",
     "@simplewebauthn/server": "^7.2.0",
     "tiny-invariant": "^1.3.1"
   },

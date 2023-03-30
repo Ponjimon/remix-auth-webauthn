@@ -1,7 +1,11 @@
 import { redirect, type SessionStorage } from '@remix-run/server-runtime';
 import {
+  generateAuthenticationOptions,
   generateRegistrationOptions,
+  type VerifiedAuthenticationResponse,
   verifyRegistrationResponse,
+  verifyAuthenticationResponse,
+  VerifiedRegistrationResponse,
 } from '@simplewebauthn/server';
 import {
   Strategy,
@@ -9,10 +13,13 @@ import {
   type AuthenticateOptions,
 } from 'remix-auth';
 import invariant from 'tiny-invariant';
-import { StringUtil } from '@ponjimon/utils';
 import type {
+  AuthenticationResponseJSON,
+  AuthenticatorDevice,
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialDescriptorFuture,
+  PublicKeyCredentialJSON,
+  PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON,
 } from '@simplewebauthn/typescript-types';
 
@@ -23,25 +30,22 @@ export type WebAuthnUser = {
 export type AuthenticationMode = 'registration' | 'authentication';
 export type WebAuthnStrategyRegistrationOptions = {
   mode: 'registration';
-  user: {
-    name: string;
-    email: string;
-  };
-  credential: {
-    deviceType: string;
-    externalId: string;
-    publicKey: string;
-  };
+  userIdentifier: string;
+  userDisplayName: string;
+  registrationInfo: VerifiedRegistrationResponse['registrationInfo'];
 };
 export type WebAuthnStrategyAuthenticationOptions = {
   mode: 'authentication';
-  data: Record<string, unknown>; // TODO
+  userIdentifier: string;
+  authenticationInfo: VerifiedAuthenticationResponse['authenticationInfo'];
 };
 export type WebAuthnStrategyVerifyParams =
   | WebAuthnStrategyRegistrationOptions
   | WebAuthnStrategyAuthenticationOptions;
 
-export type GetUserCredentialsFunction = (email: string) => Promise<string[]>;
+export type GetUserCredentialsFunction = (
+  email: string
+) => Promise<AuthenticatorDevice[]>;
 export type VerifyUserIdentifierFunction = (
   userIdentifier: string
 ) => Promise<boolean>;
@@ -122,6 +126,9 @@ export class WebAuthnStrategy<User> extends Strategy<
     requiredOptions: 'Credential options are required.',
     invalidEmail: 'Email is invalid.',
     invalidOptions: 'Credential options are invalid.',
+    unauthorizedCredential: 'No credential found for this user.',
+    invalidRegistration: 'Registration failed.',
+    invalidAuthentication: 'Authentication failed.',
   };
 
   private readonly expectedOrigin: string;
@@ -184,7 +191,10 @@ export class WebAuthnStrategy<User> extends Strategy<
       | null;
     const sessionCredentialOptions = session.get(
       this.sessionCredentialOptionsKey
-    ) as PublicKeyCredentialCreationOptionsJSON | null;
+    ) as
+      | PublicKeyCredentialCreationOptionsJSON
+      | PublicKeyCredentialRequestOptionsJSON
+      | null;
 
     let user: User | null = session.get(options.sessionKey) ?? null;
 
@@ -193,12 +203,8 @@ export class WebAuthnStrategy<User> extends Strategy<
         invariant(options.successRedirect, 'Expected successRedirect');
 
         const formData = await request.formData();
-        if (
-          url.pathname === this.registrationPath &&
-          !sessionUserIdentifier &&
-          !sessionCredentialOptions
-        ) {
-          // Start Registration
+        if (!sessionUserIdentifier && !sessionCredentialOptions) {
+          // Generate Options
           const email = formData.get(this.emailField);
 
           invariant(
@@ -210,28 +216,47 @@ export class WebAuthnStrategy<User> extends Strategy<
             throw new Error(this.errors.invalidEmail);
           }
 
-          const credentials = await this.getUserCredentials(email);
-          const registrationOptions = generateRegistrationOptions({
-            rpID: this.expectedRPID,
-            rpName: this.expectedOrigin,
-            userID: await this.generateUserId(),
-            userName: email,
-            authenticatorSelection: {
-              authenticatorAttachment: 'platform',
-              requireResidentKey: true,
-              userVerification: 'required',
-              residentKey: 'required',
-            },
-            timeout: this.credentialsTimeout,
-            excludeCredentials:
-              credentials.map<PublicKeyCredentialDescriptorFuture>(id => ({
+          const userCredentials = await this.getUserCredentials(email);
+          const existingCredentials =
+            userCredentials.map<PublicKeyCredentialDescriptorFuture>(
+              ({ credentialID }) => ({
                 type: 'public-key',
-                id: new TextEncoder().encode(id),
-              })),
-          });
+                id: credentialID,
+                // TODO: transports
+              })
+            );
+
+          const credentialOptions =
+            url.pathname === this.registrationPath
+              ? generateRegistrationOptions({
+                  rpID: this.expectedRPID,
+                  rpName: this.expectedOrigin,
+                  userID: await this.generateUserId(),
+                  userName: email,
+                  authenticatorSelection: {
+                    authenticatorAttachment: 'platform',
+                    requireResidentKey: true,
+                    userVerification: 'required',
+                    residentKey: 'required',
+                  },
+                  timeout: this.credentialsTimeout,
+                  excludeCredentials: existingCredentials,
+                })
+              : url.pathname === this.loginPath
+              ? generateAuthenticationOptions({
+                  rpID: this.expectedRPID,
+                  timeout: this.credentialsTimeout,
+                  userVerification: 'required',
+                  allowCredentials: existingCredentials,
+                })
+              : null;
+
+          if (!credentialOptions) {
+            throw new Error('Invalid path.');
+          }
 
           session.set(this.sessionUserIdentifierKey, email);
-          session.set(this.sessionCredentialOptionsKey, registrationOptions);
+          session.set(this.sessionCredentialOptionsKey, credentialOptions);
           session.unset(options.sessionErrorKey);
 
           throw redirect(options.successRedirect, {
@@ -241,81 +266,117 @@ export class WebAuthnStrategy<User> extends Strategy<
           });
         }
 
-        if (
-          url.pathname === this.registrationPath &&
-          sessionUserIdentifier &&
-          sessionCredentialOptions
-        ) {
-          // Continue Registration
-          const username = formData.get(this.usernameField);
-          const registrationOptionsString = formData.get('options');
+        if (sessionUserIdentifier && sessionCredentialOptions) {
+          // Verify Credentials
+          const credentialOptionsString = formData.get('options');
 
           invariant(
-            username && typeof username === 'string',
-            this.errors.requiredUsername
-          );
-          invariant(
-            registrationOptionsString &&
-              typeof registrationOptionsString === 'string',
+            credentialOptionsString &&
+              typeof credentialOptionsString === 'string',
             this.errors.requiredOptions
           );
 
-          let registrationOptions: RegistrationResponseJSON;
+          let credentialOptions: PublicKeyCredentialJSON;
 
           try {
-            registrationOptions = JSON.parse(registrationOptionsString);
+            credentialOptions = JSON.parse(credentialOptionsString);
           } catch (e) {
             throw new Error(this.errors.invalidOptions);
           }
 
-          const { verified, registrationInfo } =
-            await verifyRegistrationResponse({
-              response: registrationOptions,
+          const isAuthentication = url.pathname === this.loginPath;
+          const isRegistration = url.pathname === this.registrationPath;
+
+          if (
+            isRegistration &&
+            this.isRegistrationResponse(credentialOptions)
+          ) {
+            const username = formData.get(this.usernameField);
+            invariant(
+              username && typeof username === 'string',
+              this.errors.requiredUsername
+            );
+
+            const response = await verifyRegistrationResponse({
+              response: credentialOptions,
               expectedChallenge: sessionCredentialOptions.challenge,
               expectedOrigin: this.expectedOrigin,
               expectedRPID: this.expectedRPID,
             });
 
-          if (!verified || !registrationInfo) {
-            throw new Error('Unable to verify registration response.');
+            const { verified, registrationInfo } = response;
+
+            if (!verified || !registrationInfo) {
+              throw new Error(this.errors.invalidRegistration);
+            }
+
+            user = await this.verify({
+              mode: 'registration',
+              userIdentifier: sessionUserIdentifier,
+              userDisplayName: username,
+              registrationInfo,
+            });
           }
 
-          user = await this.verify({
-            mode: 'registration',
-            user: {
-              name: username,
-              email: sessionUserIdentifier,
-            },
-            credential: {
-              externalId: StringUtil.encode(
-                registrationInfo.credentialID,
-                'base64'
-              ),
-              deviceType: registrationInfo.credentialDeviceType,
-              publicKey: StringUtil.encode(
-                registrationInfo.credentialPublicKey,
-                'base64'
-              ),
-            },
-          });
-          console.log('Verified.');
+          if (
+            isAuthentication &&
+            this.isAuthenticationResponse(credentialOptions)
+          ) {
+            const credentials = await this.getUserCredentials(
+              sessionUserIdentifier
+            );
+
+            const credential = credentials.find(
+              ({ credentialID }) =>
+                new TextDecoder().decode(credentialID) === credentialOptions.id
+            );
+
+            if (!credential) {
+              throw new Error(this.errors.unauthorizedCredential);
+            }
+
+            const response = await verifyAuthenticationResponse({
+              response: credentialOptions,
+              expectedChallenge: sessionCredentialOptions.challenge,
+              expectedOrigin: this.expectedOrigin,
+              expectedRPID: this.expectedRPID,
+              authenticator: credential,
+              advancedFIDOConfig: {
+                userVerification: 'required',
+              },
+            });
+
+            const { verified, authenticationInfo } = response;
+
+            if (!verified || !authenticationInfo) {
+              throw new Error(this.errors.invalidAuthentication);
+            }
+
+            user = await this.verify({
+              mode: 'authentication',
+              userIdentifier: sessionUserIdentifier,
+              authenticationInfo,
+            });
+          }
 
           session.set(options.sessionKey, user);
           session.unset(this.sessionUserIdentifierKey);
           session.unset(this.sessionCredentialOptionsKey);
           session.unset(options.sessionErrorKey);
 
+          if (!user) {
+            session.unset(options.sessionKey);
+            throw new Error('Unknown error.');
+          }
+
           throw redirect(options.successRedirect, {
             headers: {
               'Set-Cookie': await sessionStorage.commitSession(session),
             },
           });
         }
-
-        throw new Error('Unknown error.');
       }
     } catch (error) {
-      console.log('ER', error);
       if (error instanceof Response && error.status === 302) {
         throw error;
       }
@@ -348,5 +409,27 @@ export class WebAuthnStrategy<User> extends Strategy<
 
   private validateEmail(email: unknown): email is string {
     return /.+@.+/u.test(email as string);
+  }
+
+  private isRegistrationResponse(
+    options: unknown
+  ): options is RegistrationResponseJSON {
+    return (
+      typeof options === 'object' &&
+      options !== null &&
+      'response' in options &&
+      'attestationObject' in (options as RegistrationResponseJSON).response
+    );
+  }
+
+  private isAuthenticationResponse(
+    options: unknown
+  ): options is AuthenticationResponseJSON {
+    return (
+      typeof options === 'object' &&
+      options !== null &&
+      'response' in options &&
+      'authenticatorData' in (options as AuthenticationResponseJSON).response
+    );
   }
 }

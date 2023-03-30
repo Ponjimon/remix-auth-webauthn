@@ -1,20 +1,9 @@
-# Package Managers.
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
-pnpm-lock.yml
-node_modules
-
-# Editor Configs.
-.idea
+.DS_STORE
 .vscode
-.DS_Store
+.idea
 
-# Files.
-/.cache
-/build
-/public/build
 .env
-
-# Tests.
-/coverage
+dist/
+node_modules/
+yarn-error.log
+tsconfig.tsbuildinfo
